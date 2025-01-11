@@ -14,43 +14,27 @@ import (
 	"github.com/StackExchange/dnscontrol/v4/providers/cloudflare/rtypes/cfsingleredirect"
 )
 
-// get list of domains for account. Cache so the ids can be looked up from domain name
-// The caller must do all locking.
-func (c *cloudflareProvider) cacheDomainList() error {
-	if c.domainIndex != nil {
-		return nil
-	}
-
-	//fmt.Printf("DEBUG: CLOUDFLARE POPULATING CACHE\n")
+func (c *cloudflareProvider) fetchAllZones() (map[string]cloudflare.Zone, error) {
 	zones, err := c.cfClient.ListZones(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed fetching domain list from cloudflare(%q): %s", c.cfClient.APIEmail, err)
+		return nil, fmt.Errorf("failed fetching domain list from cloudflare(%q): %s", c.cfClient.APIEmail, err)
 	}
 
-	c.domainIndex = map[string]string{}
-	c.nameservers = map[string][]string{}
-
+	m := make(map[string]cloudflare.Zone, len(zones))
 	for _, zone := range zones {
-		c.addZoneToCacheLocked(zone)
-	}
-	return nil
-}
-
-// addZoneToCacheLocked adds a given zone to the cache
-// The caller must hold Mutex.
-func (c *cloudflareProvider) addZoneToCacheLocked(zone cloudflare.Zone) {
-	if encoded, err := idna.ToASCII(zone.Name); err == nil && encoded != zone.Name {
-		if _, ok := c.domainIndex[encoded]; ok {
-			fmt.Printf("WARNING: Zone %q appears twice in this cloudflare account\n", encoded)
+		encoded, err := idna.ToASCII(zone.Name)
+		if err == nil && encoded != zone.Name {
+			if _, existsEncoded := m[encoded]; existsEncoded {
+				fmt.Printf("WARNING: Zone %q appears twice in this cloudflare account\n", encoded)
+			}
+			m[encoded] = zone
 		}
-		c.domainIndex[encoded] = zone.ID
-		c.nameservers[encoded] = zone.NameServers
+		if _, exists := m[zone.Name]; exists {
+			fmt.Printf("WARNING: Zone %q appears twice in this cloudflare account\n", zone.Name)
+		}
+		m[zone.Name] = zone
 	}
-	if _, ok := c.domainIndex[zone.Name]; ok {
-		fmt.Printf("WARNING: Zone %q appears twice in this cloudflare account\n", zone.Name)
-	}
-	c.domainIndex[zone.Name] = zone.ID
-	c.nameservers[zone.Name] = zone.NameServers
+	return m, nil
 }
 
 // get all records for a domain
@@ -79,7 +63,10 @@ func (c *cloudflareProvider) createZone(domainName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	c.addZoneToCacheLocked(zone)
+	if encoded, err := idna.ToASCII(zone.Name); err == nil && encoded != zone.Name {
+		c.zoneCache.SetZone(encoded, zone)
+	}
+	c.zoneCache.SetZone(domainName, zone)
 	return zone.ID, nil
 }
 
